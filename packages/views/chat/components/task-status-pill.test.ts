@@ -53,12 +53,13 @@ describe("pickStageKeys", () => {
       });
     });
 
-    it("queued + undefined availability + elapsed > 30s → still stuck (presence still loading shouldn't hide the cue)", () => {
-      // Loading presence shouldn't gate the stuck warning; if the user has
-      // been waiting longer than the threshold, the cue applies regardless.
+    it("queued + undefined availability + elapsed > 30s → stays queued (don't speculate while presence is loading)", () => {
+      // chat-window passes `undefined` precisely so we DON'T render
+      // speculative availability copy. "Stuck" is a diagnosis — it needs
+      // affirmative evidence the runtime is online, otherwise a slow
+      // presence query would falsely accuse a healthy daemon.
       expect(pickStageKeys("queued", NO_MSGS, undefined, 45)).toEqual({
-        stageKey: "stuck",
-        static: true,
+        stageKey: "queued",
       });
     });
 

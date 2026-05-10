@@ -89,8 +89,16 @@ export function pickStageKeys(
   // (or recently was) but isn't picking up the task". A static label flagged
   // as stuck gives the user something to act on instead of an unbounded
   // "queued · 90s · 120s · …" timer.
+  //
+  // Gated on `availability === "online"` (NOT `!== "offline"`): when
+  // presence is still loading or temporarily unavailable, chat-window
+  // surfaces it as `undefined` precisely so we don't speculate about
+  // reachability. Treating undefined as "stuck" would slap a "Daemon not
+  // responding" diagnosis onto users whose runtime might be perfectly
+  // healthy but whose presence query is slow.
   if (
     (status === "queued" || status === "dispatched") &&
+    availability === "online" &&
     elapsedSecs >= STUCK_THRESHOLD_SECS
   ) {
     return { stageKey: "stuck", static: true };
