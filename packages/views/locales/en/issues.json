@@ -239,6 +239,13 @@
     "status_failed": "Failed",
     "status_cancelled": "Cancelled"
   },
+  "terminate_dialog": {
+    "title": "Stop this task?",
+    "body": "The task will be cancelled and cannot be resumed.",
+    "running_note": " Running work may take a few seconds to fully halt.",
+    "keep": "Keep running",
+    "confirm": "Stop task"
+  },
   "batch": {
     "selected": "{{count}} selected",
     "status": "Status",
