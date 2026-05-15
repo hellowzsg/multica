@@ -258,11 +258,11 @@ func sweepStaleTasks(ctx context.Context, queries *db.Queries, taskSvc *service.
 }
 
 // sweepExpiredClaimLeases is the global backstop that requeues dispatched
-// tasks whose claim lease has expired. Only requeues tasks whose runtime has
-// a fresh heartbeat (last_seen_at within staleThresholdSeconds), preventing
-// requeue to a dead runtime in the 90s gap between lease expiry (60s) and
-// offline detection (150s). The primary requeue path is the preflight in
-// ClaimTaskForRuntime (self-requeue when the runtime actively claims).
+// tasks whose claim lease has expired. Only requeues tasks whose runtime's
+// liveness key has expired (confirmed dead), preventing requeue to a
+// seemingly-alive runtime whose daemon actually crashed (60s lease expires
+// but 90s liveness key still present). Alive runtimes handle their own
+// expired leases via the preflight in ClaimTaskForRuntime when they next poll.
 func sweepExpiredClaimLeases(ctx context.Context, taskSvc *service.TaskService) {
 	if taskSvc == nil {
 		return

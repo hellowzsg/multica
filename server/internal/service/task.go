@@ -1022,10 +1022,11 @@ func startAgentTaskRowToQueue(r db.StartAgentTaskWithClaimTokenRow) db.AgentTask
 
 // RequeueExpiredClaimLeases is the global backstop that requeues dispatched
 // tasks whose claim lease has expired. Only requeues tasks for runtimes
-// confirmed alive via LivenessStore (Redis heartbeat). When LivenessStore is
-// unavailable, skips entirely — the preflight self-requeue in
-// ClaimTaskForRuntime handles live runtimes, and the offline sweeper will
-// eventually fail tasks on dead ones.
+// confirmed DEAD via LivenessStore (liveness key expired). Alive runtimes
+// handle their own expired leases via the preflight self-requeue in
+// ClaimTaskForRuntime when they next poll. When LivenessStore is unavailable,
+// skips entirely — the preflight handles live runtimes, and the offline
+// sweeper will eventually fail tasks on dead ones.
 func (s *TaskService) RequeueExpiredClaimLeases(ctx context.Context, staleThresholdSecs float64) int {
 	if s.Liveness == nil || !s.Liveness.Available() {
 		// No reliable liveness signal — skip global requeue.
@@ -1057,7 +1058,10 @@ func (s *TaskService) RequeueExpiredClaimLeases(ctx context.Context, staleThresh
 
 	total := 0
 	for i, id := range runtimeIDs {
-		if alive[idStrs[i]] {
+		if !alive[idStrs[i]] {
+			// Only requeue for confirmed-dead runtimes (liveness expired).
+			// Alive runtimes handle their own expired leases via the
+			// preflight in ClaimTaskForRuntime when they next poll.
 			total += s.RequeueExpiredClaimLeasesForRuntime(ctx, id)
 		}
 	}
