@@ -77,13 +77,17 @@ export function CreateSquadModal({ onClose }: { onClose: () => void }) {
   const [selectedMembers, setSelectedMembers] = useState<SelectedMember[]>([]);
   const [creating, setCreating] = useState(false);
 
-  // Keep the additional-members list in sync with the leader choice. When the
-  // user flips the leader to an agent that's already in their picks, the
-  // duplicate is silently dropped — leader is implicit and never double-counted.
-  const sanitizedMembers = useMemo(
-    () => selectedMembers.filter((m) => !(m.type === "agent" && m.id === leaderId)),
-    [selectedMembers, leaderId],
-  );
+  // Promoting an agent to leader must actually drop it from selectedMembers,
+  // not merely hide it. Otherwise switching leader away later resurrects the
+  // hidden pick and silently submits it as a member.
+  const handleLeaderChange = (id: string) => {
+    setLeaderId(id);
+    if (id) {
+      setSelectedMembers((prev) =>
+        prev.filter((m) => !(m.type === "agent" && m.id === id)),
+      );
+    }
+  };
 
   const canSubmit = !!name.trim() && !!leaderId && !creating;
 
@@ -99,9 +103,9 @@ export function CreateSquadModal({ onClose }: { onClose: () => void }) {
       });
       queryClient.invalidateQueries({ queryKey: workspaceKeys.squads(wsId) });
 
-      if (sanitizedMembers.length > 0) {
+      if (selectedMembers.length > 0) {
         await Promise.allSettled(
-          sanitizedMembers.map(async (m) => {
+          selectedMembers.map(async (m) => {
             try {
               await api.addSquadMember(squad.id, {
                 member_type: m.type,
@@ -199,7 +203,7 @@ export function CreateSquadModal({ onClose }: { onClose: () => void }) {
               agents={activeAgents}
               currentUserId={currentUserId}
               value={leaderId}
-              onChange={setLeaderId}
+              onChange={handleLeaderChange}
             />
 
             <AdditionalMembersPicker
@@ -207,7 +211,7 @@ export function CreateSquadModal({ onClose }: { onClose: () => void }) {
               members={wsMembers}
               currentUserId={currentUserId}
               leaderId={leaderId}
-              value={sanitizedMembers}
+              value={selectedMembers}
               onChange={setSelectedMembers}
             />
           </div>
@@ -462,38 +466,51 @@ function AdditionalMembersPicker({
           if (!v) setFilter("");
         }}
       >
-        <PopoverTrigger className="flex w-full min-w-0 items-center gap-3 rounded-lg border border-border bg-background px-3 py-2.5 text-left text-sm transition-colors hover:bg-muted">
-          {value.length === 0 ? (
-            <>
-              <UserPlus className="h-4 w-4 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                {t(($) => $.create_squad.members_placeholder)}
-              </span>
-            </>
-          ) : (
-            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-              {value.slice(0, CHIP_DISPLAY_LIMIT).map((m) => (
-                <MemberChip
-                  key={`${m.type}:${m.id}`}
-                  m={m}
-                  onRemove={() => remove(m)}
-                />
-              ))}
-              {value.length > CHIP_DISPLAY_LIMIT && (
-                <span className="rounded-md bg-muted px-1.5 py-0.5 text-xs font-medium text-muted-foreground tabular-nums">
-                  {t(($) => $.create_squad.members_more_count, {
-                    count: value.length - CHIP_DISPLAY_LIMIT,
-                  })}
-                </span>
+        {/* render={<div role="combobox" />} — chips contain their own remove
+            <button>, so the trigger cannot itself be a <button> without
+            nesting interactive content. Base UI injects click/keyboard/ARIA
+            wiring into the rendered element. */}
+        <PopoverTrigger
+          render={
+            <div
+              role="combobox"
+              aria-haspopup="listbox"
+              tabIndex={0}
+              className="flex w-full min-w-0 cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-3 py-2.5 text-left text-sm transition-colors hover:bg-muted focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {value.length === 0 ? (
+                <>
+                  <UserPlus className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                    {t(($) => $.create_squad.members_placeholder)}
+                  </span>
+                </>
+              ) : (
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                  {value.slice(0, CHIP_DISPLAY_LIMIT).map((m) => (
+                    <MemberChip
+                      key={`${m.type}:${m.id}`}
+                      m={m}
+                      onRemove={() => remove(m)}
+                    />
+                  ))}
+                  {value.length > CHIP_DISPLAY_LIMIT && (
+                    <span className="rounded-md bg-muted px-1.5 py-0.5 text-xs font-medium text-muted-foreground tabular-nums">
+                      {t(($) => $.create_squad.members_more_count, {
+                        count: value.length - CHIP_DISPLAY_LIMIT,
+                      })}
+                    </span>
+                  )}
+                </div>
               )}
+              <ChevronDown
+                className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${
+                  open ? "rotate-180" : ""
+                }`}
+              />
             </div>
-          )}
-          <ChevronDown
-            className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${
-              open ? "rotate-180" : ""
-            }`}
-          />
-        </PopoverTrigger>
+          }
+        />
         <PopoverContent align="start" className="w-[var(--anchor-width)] p-0">
           <div className="border-b px-2 py-1.5">
             <input

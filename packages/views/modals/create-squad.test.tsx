@@ -122,15 +122,22 @@ vi.mock("@multica/ui/components/ui/popover", () => ({
     children,
     className,
     onClick,
+    render,
   }: {
-    children: ReactNode;
+    children?: ReactNode;
     className?: string;
     onClick?: () => void;
-  }) => (
-    <button type="button" className={className} onClick={onClick}>
-      {children}
-    </button>
-  ),
+    render?: ReactNode;
+  }) => {
+    // Base UI's `render` prop replaces the trigger with the provided element.
+    // The mock just renders it as-is so its children stay queryable in tests.
+    if (render !== undefined) return <>{render}</>;
+    return (
+      <button type="button" className={className} onClick={onClick}>
+        {children}
+      </button>
+    );
+  },
   PopoverContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }));
 
@@ -350,6 +357,42 @@ describe("CreateSquadModal", () => {
       expect(mocks.createSquad).toHaveBeenCalledTimes(1);
     });
     // addSquadMember must NOT be called for the agent we promoted to leader.
+    expect(mocks.addSquadMember).not.toHaveBeenCalled();
+  });
+
+  it("removes a member promoted to leader from selectedMembers so switching leader away does not resurrect it", async () => {
+    renderModal();
+    // 1. Add MineAgentTwo as an additional member.
+    fireEvent.click(lastMatch("MineAgentTwo"));
+    await waitFor(() => {
+      expect(screen.getAllByText("MineAgentTwo").length).toBeGreaterThanOrEqual(2);
+    });
+
+    // 2. Promote MineAgentTwo to leader (first occurrence is the leader picker row).
+    fireEvent.click(firstMatch("MineAgentTwo"));
+
+    // 3. Switch leader back to MineAgentOne. With MineAgentTwo now the leader,
+    //    the additional-members picker filters it out, so MineAgentOne only
+    //    appears twice (leader picker + members picker) and firstMatch hits
+    //    the leader picker row.
+    fireEvent.click(firstMatch("MineAgentOne"));
+
+    // 4. Submit and assert MineAgentTwo is NOT submitted as a member — the
+    //    promotion must have permanently dropped it from selectedMembers.
+    mocks.createSquad.mockResolvedValue(makeSquad({ id: "sq-3", leader_id: "agent-mine-1" }));
+    fireEvent.change(screen.getByPlaceholderText(/e\.g\. Frontend Team/i), {
+      target: { value: "Swap Squad" },
+    });
+    fireEvent.click(getSubmitButton());
+
+    await waitFor(() => {
+      expect(mocks.createSquad).toHaveBeenCalledWith({
+        name: "Swap Squad",
+        description: undefined,
+        leader_id: "agent-mine-1",
+        avatar_url: undefined,
+      });
+    });
     expect(mocks.addSquadMember).not.toHaveBeenCalled();
   });
 
