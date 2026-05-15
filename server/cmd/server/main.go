@@ -312,6 +312,7 @@ func main() {
 		liveness = handler.NewRedisLivenessStore(storeRedis)
 	}
 	taskSvc.Liveness = liveness
+	taskSvc.EmptyClaim = service.NewEmptyClaimCache(storeRedis)
 
 	// Start background sweeper to mark stale runtimes as offline.
 	go runRuntimeSweeper(sweepCtx, queries, liveness, taskSvc, bus)
