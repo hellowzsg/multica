@@ -1003,12 +1003,9 @@ func TestPrepareWithRepoContextOpencode(t *testing.T) {
 }
 
 // TestInjectRuntimeConfigRequiresExplicitCommentPost ensures the injected
-// workflow makes "post a comment with results" an explicit, unmissable step in
-// both the assignment- and comment-triggered branches, plus hard-warns in the
-// Output section that terminal/log text is not user-visible. Agents were
-// silently finishing tasks without ever posting their result to the issue; see
-// MUL-1124. Covering this in a test prevents the guidance from decaying back
-// into a nested clause again.
+// stable Output section still tells issue-based agents that terminal/log text
+// is not user-visible, without embedding the current issue/comment IDs. The
+// exact issue-specific command now lives in BuildPrompt.
 func TestInjectRuntimeConfigRequiresExplicitCommentPost(t *testing.T) {
 	t.Parallel()
 
@@ -1035,11 +1032,9 @@ func TestInjectRuntimeConfigRequiresExplicitCommentPost(t *testing.T) {
 			}
 			s := string(data)
 
-			// The workflow must contain an explicit `multica issue comment add`
-			// invocation for this issue — not just a prose mention of posting.
 			mustContain := []string{
-				"multica issue comment add issue-1",
-				"mandatory",
+				"results must be delivered via `multica issue comment add`",
+				"does NOT see your terminal output",
 			}
 			for _, want := range mustContain {
 				if !strings.Contains(s, want) {
@@ -1047,15 +1042,13 @@ func TestInjectRuntimeConfigRequiresExplicitCommentPost(t *testing.T) {
 				}
 			}
 
-			// The Output section must carry a hard warning that terminal/log
-			// output is not user-visible. This is the second line of defense
-			// in case the agent skips past the workflow steps.
-			for _, want := range []string{
-				"Final results MUST be delivered via `multica issue comment add`",
-				"does NOT see your terminal output",
+			for _, banned := range []string{
+				"multica issue comment add issue-1",
+				"comment-1",
+				"--parent comment-1",
 			} {
-				if !strings.Contains(s, want) {
-					t.Errorf("%s: Output warning missing %q", tc.name, want)
+				if strings.Contains(s, banned) {
+					t.Errorf("%s: CLAUDE.md should not contain per-turn command fragment %q\n---\n%s", tc.name, banned, s)
 				}
 			}
 		})
@@ -1072,10 +1065,8 @@ func TestInjectRuntimeConfigRequiresExplicitCommentPost(t *testing.T) {
 // habit of emitting literal `\n` inside `--content "..."` (MUL-1467).
 // That mandate landed in the all-provider section and ended up steering
 // every provider at stdin — which then broke non-ASCII bytes on Windows
-// shells (#2198 / #2236 / #2376). This rollback keeps the strong
-// Codex-specific mandate in the Codex-Specific section (pinned by
-// TestInjectRuntimeConfigCodexLinuxEmphasizesStdin) and leaves the global
-// section neutral.
+// shells (#2198 / #2236 / #2376). The strong Codex-specific mandate now
+// lives in the per-turn prompt helpers, leaving runtime config neutral.
 //
 // Not parallel: mutates the package-level runtimeGOOS.
 func TestInjectRuntimeConfigAvailableCommandsIsNeutral(t *testing.T) {
@@ -1134,13 +1125,13 @@ func TestInjectRuntimeConfigAvailableCommandsIsNeutral(t *testing.T) {
 	}
 }
 
-// TestInjectRuntimeConfigCodexLinuxEmphasizesStdin pins the
-// Codex-Specific Comment Formatting section's "MUST stdin" mandate on
-// non-Windows hosts. This is the MUL-1467 / #1795 / #1851 fix scoped
-// back to where it belongs.
+// TestInjectRuntimeConfigCodexOmitsCommentFormattingTemplate pins that
+// Codex-specific comment command templates live in BuildPrompt, not AGENTS.md.
+// This keeps per-turn parent IDs and HEREDOC snippets from being duplicated
+// across runtime config and the task prompt.
 //
 // Not parallel: mutates the package-level runtimeGOOS.
-func TestInjectRuntimeConfigCodexLinuxEmphasizesStdin(t *testing.T) {
+func TestInjectRuntimeConfigCodexOmitsCommentFormattingTemplate(t *testing.T) {
 	saved := runtimeGOOS
 	t.Cleanup(func() { runtimeGOOS = saved })
 	runtimeGOOS = "linux"
@@ -1158,34 +1149,31 @@ func TestInjectRuntimeConfigCodexLinuxEmphasizesStdin(t *testing.T) {
 	}
 	s := string(data)
 
-	for _, want := range []string{
+	for _, banned := range []string{
 		"Codex-Specific Comment Formatting",
 		"always use `--content-stdin` with a HEREDOC",
-		"even for short single-line replies",
-		"Never use inline `--content` for agent-authored comments",
-		"Keep the same `--parent` value",
-		"do not rely on `\\n` escapes",
+		"<<'COMMENT'",
+		"comment-1",
+		"--parent comment-1",
 	} {
-		if !strings.Contains(s, want) {
-			t.Errorf("AGENTS.md missing Codex multiline guidance %q\n---\n%s", want, s)
+		if strings.Contains(s, banned) {
+			t.Errorf("AGENTS.md should not contain per-turn Codex formatting %q\n---\n%s", banned, s)
 		}
 	}
 }
 
-// TestInjectRuntimeConfigCodexWindowsUsesContentFile pins that on Windows
-// the Codex-Specific section directs the agent at `--content-file` instead
-// of `--content-stdin`. PowerShell 5.1 / cmd.exe re-encode piped HEREDOC
-// bytes through the active console codepage and silently drop non-ASCII
-// as `?` before reaching `multica.exe` (#2198 / #2236 / #2376).
+// TestInjectRuntimeConfigCodexWindowsKeepsCommandsNeutral pins that AGENTS.md
+// still lists the safe file mode but does not carry a turn-specific
+// `--content-file` reply template.
 //
 // Not parallel: mutates the package-level runtimeGOOS.
-func TestInjectRuntimeConfigCodexWindowsUsesContentFile(t *testing.T) {
+func TestInjectRuntimeConfigCodexWindowsKeepsCommandsNeutral(t *testing.T) {
 	saved := runtimeGOOS
 	t.Cleanup(func() { runtimeGOOS = saved })
 	runtimeGOOS = "windows"
 
 	dir := t.TempDir()
-	if _, err := InjectRuntimeConfig(dir, "codex", TaskContextForEnv{IssueID: "issue-1"}); err != nil {
+	if _, err := InjectRuntimeConfig(dir, "codex", TaskContextForEnv{IssueID: "issue-1", TriggerCommentID: "comment-1"}); err != nil {
 		t.Fatalf("InjectRuntimeConfig failed: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
@@ -1194,25 +1182,28 @@ func TestInjectRuntimeConfigCodexWindowsUsesContentFile(t *testing.T) {
 	}
 	s := string(data)
 	for _, want := range []string{
-		"On Windows, **always write the comment body to a UTF-8 file",
-		"$OutputEncoding",
 		"--content-file",
-		"silently dropping non-ASCII characters as `?`",
+		"--description-file",
+		"The per-turn prompt is the source of truth",
 	} {
 		if !strings.Contains(s, want) {
-			t.Errorf("AGENTS.md missing Codex/Windows file-first guidance %q\n---\n%s", want, s)
+			t.Errorf("AGENTS.md missing neutral command guidance %q\n---\n%s", want, s)
 		}
 	}
 	for _, banned := range []string{
 		"always use `--content-stdin` with a HEREDOC, even for short single-line replies",
+		"Codex-Specific Comment Formatting",
+		"--parent comment-1",
+		"comment-1",
+		"$OutputEncoding",
 	} {
 		if strings.Contains(s, banned) {
-			t.Errorf("AGENTS.md still carries Codex stdin mandate %q on Windows\n---\n%s", banned, s)
+			t.Errorf("AGENTS.md still carries per-turn Codex/Windows guidance %q\n---\n%s", banned, s)
 		}
 	}
 }
 
-func TestInjectRuntimeConfigQuickCreateOutputPrefixAgnostic(t *testing.T) {
+func TestInjectRuntimeConfigQuickCreateDefersOutputRulesToPrompt(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
@@ -1227,20 +1218,21 @@ func TestInjectRuntimeConfigQuickCreateOutputPrefixAgnostic(t *testing.T) {
 	s := string(data)
 
 	for _, want := range []string{
-		"quick-create task",
-		"Created <identifier-or-id>: <title>",
-		"identifier` from JSON output",
-		"Do not assume any workspace issue prefix",
+		"The per-turn prompt is the source of truth",
+		"chat, quick-create, and run-only autopilot tasks",
 	} {
 		if !strings.Contains(s, want) {
-			t.Errorf("quick-create runtime config missing %q\n---\n%s", want, s)
+			t.Errorf("quick-create runtime config missing stable guidance %q\n---\n%s", want, s)
 		}
 	}
 	for _, absent := range []string{
 		"Created MUL-<n>",
+		"Created <identifier-or-id>: <title>",
+		"identifier` from JSON output",
+		"multica issue create --output json",
 	} {
 		if strings.Contains(s, absent) {
-			t.Errorf("quick-create runtime config should not contain %q\n---\n%s", absent, s)
+			t.Errorf("quick-create runtime config should defer per-turn rule %q\n---\n%s", absent, s)
 		}
 	}
 }
@@ -1267,20 +1259,20 @@ func TestInjectRuntimeConfigAutopilotRunOnlyNoIssueWorkflow(t *testing.T) {
 	s := string(data)
 
 	for _, want := range []string{
-		"Autopilot in run-only mode",
-		"Autopilot run ID: `run-1`",
-		"Check dependencies and report outdated packages.",
-		"multica autopilot get autopilot-1 --output json",
-		"Your final assistant output is captured automatically as the autopilot run result",
+		"The per-turn prompt is the source of truth",
+		"chat, quick-create, and run-only autopilot tasks",
 	} {
 		if !strings.Contains(s, want) {
-			t.Errorf("autopilot runtime config missing %q\n---\n%s", want, s)
+			t.Errorf("autopilot runtime config missing stable guidance %q\n---\n%s", want, s)
 		}
 	}
 
 	for _, absent := range []string{
 		"Run `multica issue get",
-		"Final results MUST be delivered via `multica issue comment add`",
+		"Autopilot run ID: `run-1`",
+		"Check dependencies and report outdated packages.",
+		"multica autopilot get autopilot-1 --output json",
+		"Your final assistant output is captured automatically as the autopilot run result",
 	} {
 		if strings.Contains(s, absent) {
 			t.Errorf("autopilot runtime config should not contain %q\n---\n%s", absent, s)
@@ -2696,30 +2688,30 @@ func TestInjectRuntimeConfigMentionLoopHardening(t *testing.T) {
 		}
 	})
 
-	t.Run("workflow-carries-silence-as-exit-and-no-signoff-mention", func(t *testing.T) {
+	t.Run("runtime-config-omits-comment-trigger-workflow", func(t *testing.T) {
 		t.Parallel()
 		s := readClaudeMD(t, commentTriggerCtx)
-		// The anti-loop signal for CLAUDE.md lives in the numbered workflow
-		// steps (4 + 5), not in a dedicated preamble. Lock in the key phrases
-		// so the signal can't decay back into pure prose again.
-		for _, want := range []string{
+		for _, banned := range []string{
+			"comment-1",
+			"Find the triggering comment",
 			"Decide whether a reply is warranted",
-			"Silence is a valid and preferred way",
-			"Never @mention the agent you are replying to as a thank-you or sign-off",
+			"--parent comment-1",
 		} {
-			if !strings.Contains(s, want) {
-				t.Errorf("comment-triggered CLAUDE.md missing %q", want)
+			if strings.Contains(s, banned) {
+				t.Errorf("comment-triggered CLAUDE.md should not contain per-turn workflow %q\n---\n%s", banned, s)
 			}
+		}
+		if !strings.Contains(s, "The per-turn prompt is the source of truth") {
+			t.Errorf("CLAUDE.md missing per-turn source-of-truth guidance")
 		}
 	})
 }
 
-// TestInjectRuntimeConfigSquadLeaderCommentTriggeredNoAction verifies that
-// when IsSquadLeader is true and the task is comment-triggered, the generated
-// CLAUDE.md explicitly forbids posting comments that merely announce no_action.
-// This is the fix for MUL-2168 — squad leaders were posting "Exiting silently"
-// comments because the comment-triggered path lacked the prohibition.
-func TestInjectRuntimeConfigSquadLeaderCommentTriggeredNoAction(t *testing.T) {
+// TestInjectRuntimeConfigSquadLeaderNoActionDefersToPrompt verifies that
+// squad-leader no_action commands are no longer written into AGENTS.md /
+// CLAUDE.md with task-specific issue IDs. BuildPrompt owns those current-turn
+// commands.
+func TestInjectRuntimeConfigSquadLeaderNoActionDefersToPrompt(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -2737,23 +2729,17 @@ func TestInjectRuntimeConfigSquadLeaderCommentTriggeredNoAction(t *testing.T) {
 	}
 	s := string(data)
 
-	// The comment-triggered workflow must contain the squad leader no_action rule.
-	for _, want := range []string{
+	for _, banned := range []string{
 		"Squad leader rule",
-		"DO NOT post any comment",
-		"multica squad activity",
+		"multica squad activity issue-1 no_action",
+		"you MUST exit without posting any comment",
+		"comment-1",
 	} {
-		if !strings.Contains(s, want) {
-			t.Errorf("squad leader comment-triggered CLAUDE.md missing %q", want)
+		if strings.Contains(s, banned) {
+			t.Errorf("squad leader comment-triggered CLAUDE.md should not contain per-turn no_action fragment %q\n---\n%s", banned, s)
 		}
 	}
 
-	// The Output section must use strong prohibition language.
-	if !strings.Contains(s, "you MUST exit without posting any comment") {
-		t.Errorf("Output section missing strong prohibition for squad leader no_action")
-	}
-
-	// Non-squad-leader should NOT have the squad leader rule in comment-triggered path.
 	dir2 := t.TempDir()
 	ctx2 := TaskContextForEnv{
 		IssueID:          "issue-1",

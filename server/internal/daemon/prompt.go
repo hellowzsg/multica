@@ -7,13 +7,10 @@ import (
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 )
 
-// BuildPrompt constructs the task prompt for an agent CLI.
-// Keep this minimal — detailed instructions live in CLAUDE.md / AGENTS.md
-// injected by execenv.InjectRuntimeConfig. The provider string is used by
-// comment-triggered tasks: Codex's per-turn reply template needs the
-// platform-aware "stdin or file" variant, every other provider gets a
-// lightweight inline template (or Windows file for any provider on
-// Windows).
+// BuildPrompt constructs the per-turn task prompt for an agent CLI. Runtime
+// config files (CLAUDE.md / AGENTS.md / GEMINI.md) carry stable Multica
+// runtime guidance; this prompt is the authority for task-specific workflow,
+// IDs, and reply commands.
 func BuildPrompt(task Task, provider string) string {
 	if task.ChatSessionID != "" {
 		return buildChatPrompt(task)
@@ -27,11 +24,34 @@ func BuildPrompt(task Task, provider string) string {
 	if task.QuickCreatePrompt != "" {
 		return buildQuickCreatePrompt(task)
 	}
+	return buildIssuePrompt(task, provider)
+}
+
+// buildIssuePrompt constructs the per-turn prompt for an assignment-triggered
+// issue task. It carries the issue-specific workflow that used to live in
+// runtime config so resumed sessions cannot apply stale IDs or output rules.
+func buildIssuePrompt(task Task, provider string) string {
 	var b strings.Builder
 	b.WriteString("You are running as a local coding agent for a Multica workspace.\n\n")
 	fmt.Fprintf(&b, "Your assigned issue ID is: %s\n\n", task.IssueID)
-	fmt.Fprintf(&b, "Start by running `multica issue get %s --output json` to understand your task, then complete it.\n", task.IssueID)
-	fmt.Fprintf(&b, "If you need comment history, `multica issue comment list %s --output json` returns all comments for the issue (server caps at 2000). Pass `--since <RFC3339>` to fetch only comments newer than a known cursor.\n", task.IssueID)
+	b.WriteString("Workflow:\n\n")
+	fmt.Fprintf(&b, "1. Run `multica issue get %s --output json` to understand the task.\n", task.IssueID)
+	fmt.Fprintf(&b, "2. Run `multica issue comment list %s --output json` to read the full comment history. Earlier comments often carry context the issue body lacks.\n", task.IssueID)
+	fmt.Fprintf(&b, "3. Run `multica issue status %s in_progress` before making changes.\n", task.IssueID)
+	b.WriteString("4. Complete the requested work using the repo and skills that apply.\n")
+	if isSquadLeaderTask(task) {
+		fmt.Fprintf(&b, "5. If your evaluation outcome is `no_action`, call `multica squad activity %s no_action --reason \"...\"` and exit without posting a comment. Do not post a comment whose only purpose is to announce no_action or say you are exiting silently.\n", task.IssueID)
+		b.WriteString("6. For `action` or `failed` outcomes, post your final result as an issue comment. Text in your terminal or run logs is not delivered to the user.\n\n")
+	} else {
+		b.WriteString("5. Post your final result as an issue comment. Text in your terminal or run logs is not delivered to the user.\n\n")
+	}
+	b.WriteString(execenv.BuildIssueResultInstructions(provider, task.IssueID))
+	b.WriteString("\n")
+	if isSquadLeaderTask(task) {
+		fmt.Fprintf(&b, "7. When done, run `multica issue status %s in_review`. If blocked, run `multica issue status %s blocked` and post a comment explaining why.\n", task.IssueID, task.IssueID)
+	} else {
+		fmt.Fprintf(&b, "6. When done, run `multica issue status %s in_review`. If blocked, run `multica issue status %s blocked` and post a comment explaining why.\n", task.IssueID, task.IssueID)
+	}
 	return b.String()
 }
 
@@ -142,14 +162,27 @@ func buildCommentPrompt(task Task, provider string) string {
 		if task.TriggerAuthorType == "agent" {
 			b.WriteString("⚠️ The triggering comment was posted by another agent. Decide whether a reply is warranted. If you produced actual work this turn (investigated, fixed something, answered a real question), post the result as a normal reply — that is NOT a noise comment, and the standard rule that final results must be delivered via comment still applies. If the triggering comment was a pure acknowledgment, thanks, or sign-off AND you produced no work this turn, do NOT reply — and do NOT post a comment saying 'No reply needed' or similar. Simply exit with no output. Silence is the preferred way to end agent-to-agent threads. If you do reply, do not @mention the other agent as a sign-off (that re-triggers them and starts a loop).\n\n")
 		}
-		if task.Agent != nil && strings.Contains(task.Agent.Instructions, "## Squad Operating Protocol") {
+		if isSquadLeaderTask(task) {
 			fmt.Fprintf(&b, "⚠️ **Squad leader no_action rule:** If you decide no action is needed, call `multica squad activity %s no_action --reason \"...\"` and EXIT. DO NOT post any comment — not even one that says \"no action needed\" or \"exiting silently\". The squad activity call records your decision; a comment is redundant noise.\n\n", task.IssueID)
 		}
 	}
-	fmt.Fprintf(&b, "Start by running `multica issue get %s --output json` to understand your task, then decide how to proceed.\n\n", task.IssueID)
-	fmt.Fprintf(&b, "If you need comment history, `multica issue comment list %s --output json` returns all comments for the issue (server caps at 2000). Pass `--since <RFC3339>` to fetch only comments newer than a known cursor.\n\n", task.IssueID)
+	b.WriteString("Workflow:\n\n")
+	fmt.Fprintf(&b, "1. Run `multica issue get %s --output json` to understand the issue context.\n", task.IssueID)
+	fmt.Fprintf(&b, "2. Run `multica issue comment list %s --output json` to read the conversation (returns all comments, capped server-side at 2000). Pass `--since <RFC3339>` only when incrementally polling from a known cursor.\n", task.IssueID)
+	fmt.Fprintf(&b, "3. Find the triggering comment (ID: `%s`) and answer THIS comment, not an older one.\n", task.TriggerCommentID)
+	if isSquadLeaderTask(task) {
+		fmt.Fprintf(&b, "4. Decide whether a reply is warranted. If your evaluation outcome is `no_action`, call `multica squad activity %s no_action --reason \"...\"` and exit without posting any comment. For `action` or `failed` outcomes, post the result as a normal reply.\n", task.IssueID)
+	} else {
+		b.WriteString("4. Decide whether a reply is warranted. If you produced actual work this turn (investigated, fixed, answered a real question), post the result as a normal reply. If the triggering comment was a pure acknowledgment, thanks, or sign-off from another agent and you produced no work this turn, do not post a reply.\n")
+	}
+	b.WriteString("5. If a reply is warranted, do the requested work first, then post the result as a comment. Do not @mention the agent you are replying to as a thank-you or sign-off.\n")
+	b.WriteString("6. Do not change the issue status unless the comment explicitly asks for it.\n\n")
 	b.WriteString(execenv.BuildCommentReplyInstructions(provider, task.IssueID, task.TriggerCommentID))
 	return b.String()
+}
+
+func isSquadLeaderTask(task Task) bool {
+	return task.Agent != nil && strings.Contains(task.Agent.Instructions, "## Squad Operating Protocol")
 }
 
 // buildChatPrompt constructs a prompt for interactive chat tasks.
@@ -158,6 +191,11 @@ func buildChatPrompt(task Task) string {
 	b.WriteString("You are running as a chat assistant for a Multica workspace.\n")
 	b.WriteString("A user is chatting with you directly. Respond to their message.\n\n")
 	fmt.Fprintf(&b, "User message:\n%s\n", task.ChatMessage)
+	b.WriteString("\nChat workflow:\n")
+	b.WriteString("- Use the `multica` CLI when you need to look up issues, workspace info, members, agents, or squads.\n")
+	b.WriteString("- If the user asks you to perform an issue action, use the appropriate CLI command.\n")
+	b.WriteString("- If the task requires code changes, use `multica repo checkout <url>` to get the code first.\n")
+	b.WriteString("- Reply directly in chat; do not post an issue comment unless the user explicitly asks for that.\n")
 	// List attachments by id + filename so the agent can fetch them via
 	// the CLI. We deliberately do NOT inline the URL: chat attachments
 	// live behind a signed CDN with a short TTL, so by the time the agent
@@ -211,5 +249,9 @@ func buildAutopilotPrompt(task Task) string {
 		b.WriteString("Complete the instructions above.\n")
 	}
 	b.WriteString("Do not run `multica issue get`; this run does not have an issue ID.\n")
+	b.WriteString("\nOutput rules:\n")
+	b.WriteString("- Your final assistant output is captured automatically as the autopilot run result.\n")
+	b.WriteString("- Do not use the issue comment/status workflow for this run: do not call `multica issue comment add` or `multica issue status` unless the autopilot instructions explicitly tell you to create or update an issue.\n")
+	b.WriteString("- Keep the final output concise and state the outcome.\n")
 	return b.String()
 }

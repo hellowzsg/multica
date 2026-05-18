@@ -311,6 +311,39 @@ func TestBuildPromptContainsIssueID(t *testing.T) {
 	}
 }
 
+func TestBuildPromptAssignmentWorkflowOwnsIssueOutput(t *testing.T) {
+	t.Parallel()
+
+	issueID := "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+	prompt := BuildPrompt(Task{
+		IssueID: issueID,
+		Agent:   &AgentData{Name: "Local Codex"},
+	}, "codex")
+
+	for _, want := range []string{
+		"Workflow:",
+		"multica issue get " + issueID + " --output json",
+		"multica issue comment list " + issueID + " --output json",
+		"multica issue status " + issueID + " in_progress",
+		"Post final results with `multica issue comment add`",
+		"multica issue comment add " + issueID,
+		"multica issue status " + issueID + " in_review",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("assignment prompt missing %q\n---\n%s", want, prompt)
+		}
+	}
+
+	for _, absent := range []string{
+		"--parent",
+		"Triggering comment",
+	} {
+		if strings.Contains(prompt, absent) {
+			t.Fatalf("assignment prompt should not contain %q\n---\n%s", absent, prompt)
+		}
+	}
+}
+
 func TestBuildPromptNoIssueDetails(t *testing.T) {
 	t.Parallel()
 
@@ -345,6 +378,10 @@ func TestBuildPromptAutopilotRunOnly(t *testing.T) {
 		"Check dependencies and report outdated packages.",
 		"multica autopilot get autopilot-1 --output json",
 		"Do not run `multica issue get`",
+		"Your final assistant output is captured automatically as the autopilot run result",
+		"Do not use the issue comment/status workflow",
+		"do not call `multica issue comment add` or `multica issue status`",
+		"Keep the final output concise",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("autopilot prompt missing %q\n---\n%s", want, prompt)
@@ -379,6 +416,8 @@ func TestBuildPromptCommentTriggered(t *testing.T) {
 		commentContent,
 		"Focus on THIS comment",
 		commentID,
+		"multica issue comment list " + issueID + " --output json",
+		"Find the triggering comment (ID: `" + commentID + "`)",
 		"multica issue comment add " + issueID + " --parent " + commentID,
 		"do NOT reuse --parent values from previous turns",
 		// Silence-as-valid-exit for agent-to-agent loops depends on the
@@ -395,6 +434,37 @@ func TestBuildPromptCommentTriggered(t *testing.T) {
 	// Should still contain CLI hint for fetching issue context.
 	if !strings.Contains(prompt, "multica issue get") {
 		t.Fatal("prompt missing CLI hint for issue context")
+	}
+}
+
+func TestBuildPromptChatWorkflowStaysDirect(t *testing.T) {
+	t.Parallel()
+
+	prompt := BuildPrompt(Task{
+		ChatSessionID: "chat-1",
+		ChatMessage:   "summarize the issue queue",
+	}, "codex")
+
+	for _, want := range []string{
+		"chat assistant",
+		"A user is chatting with you directly",
+		"summarize the issue queue",
+		"Chat workflow:",
+		"Use the `multica` CLI",
+		"Reply directly in chat",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("chat prompt missing %q\n---\n%s", want, prompt)
+		}
+	}
+	for _, absent := range []string{
+		"Your assigned issue ID is:",
+		"multica issue comment add",
+		"multica issue status",
+	} {
+		if strings.Contains(prompt, absent) {
+			t.Fatalf("chat prompt should not contain issue workflow %q\n---\n%s", absent, prompt)
+		}
 	}
 }
 

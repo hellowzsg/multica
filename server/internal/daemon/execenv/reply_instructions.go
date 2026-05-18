@@ -2,11 +2,48 @@ package execenv
 
 import "fmt"
 
-// BuildCommentReplyInstructions returns the canonical block telling an agent
-// how to post its reply for a comment-triggered task. Both the per-turn
-// prompt (daemon.buildCommentPrompt) and the CLAUDE.md workflow
-// (InjectRuntimeConfig) call this so the trigger comment ID and the
-// --parent value cannot drift between surfaces.
+// BuildIssueResultInstructions returns the canonical per-turn block telling an
+// agent how to post final results for an assignment-triggered issue task.
+func BuildIssueResultInstructions(provider, issueID string) string {
+	if issueID == "" {
+		return ""
+	}
+	if runtimeGOOS == "windows" {
+		return fmt.Sprintf(
+			"Post final results with `multica issue comment add`. On Windows, write the comment body to a UTF-8 file with your file-write tool, then post it with `--content-file`.\n\n"+
+				"Use this form:\n\n"+
+				"    # 1. Write the result body to a UTF-8 file (e.g. result.md) with your file-write tool.\n"+
+				"    # 2. Then run:\n"+
+				"    multica issue comment add %s --content-file ./result.md\n\n"+
+				"Do NOT pipe via `--content-stdin` on Windows, and do NOT write literal `\\n` escapes to simulate line breaks.\n",
+			issueID,
+		)
+	}
+	if provider == "codex" {
+		return fmt.Sprintf(
+			"Post final results with `multica issue comment add`. For Codex on Linux/macOS, always use `--content-stdin` with a HEREDOC for agent-authored issue comments, even when the reply is a single line. Do NOT use inline `--content`.\n\n"+
+				"Use this form:\n\n"+
+				"    cat <<'COMMENT' | multica issue comment add %s --content-stdin\n"+
+				"    First paragraph.\n"+
+				"\n"+
+				"    Second paragraph.\n"+
+				"    COMMENT\n\n"+
+				"Do NOT write literal `\\n` escapes to simulate line breaks; the HEREDOC preserves real newlines.\n",
+			issueID,
+		)
+	}
+	return fmt.Sprintf(
+		"Post final results with this form:\n\n"+
+			"    multica issue comment add %s --content \"...\"\n\n"+
+			"For multi-line bodies, code blocks, or content with quotes/backticks, prefer `--content-stdin` (pipe a HEREDOC) or `--content-file <path>`.\n",
+		issueID,
+	)
+}
+
+// BuildCommentReplyInstructions returns the canonical per-turn block telling
+// an agent how to post its reply for a comment-triggered task. The trigger
+// comment ID and --parent command must live in the per-turn prompt so resumed
+// sessions cannot carry a previous turn's --parent UUID forward.
 //
 // The explicit "do not reuse --parent from previous turns" wording exists
 // because resumed Claude sessions keep prior turns' tool calls in context
