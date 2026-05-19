@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -892,7 +893,10 @@ func (h *Handler) shouldEnqueueSquadLeaderOnAssign(ctx context.Context, issue db
 }
 
 // isSquadLeaderReady returns true when the issue is assigned to a squad whose
-// leader agent is ready (has a runtime, not archived).
+// leader agent can accept work right now. Readiness criteria (archived,
+// runtime bound, runtime online) are shared with the autopilot admission
+// gate via service.AgentReadiness — both paths must move together or one
+// will start enqueueing tasks the other refuses (MUL-2429 RFC §4.b B4).
 func (h *Handler) isSquadLeaderReady(ctx context.Context, issue db.Issue) bool {
 	if !issue.AssigneeType.Valid || issue.AssigneeType.String != "squad" || !issue.AssigneeID.Valid {
 		return false
@@ -905,10 +909,16 @@ func (h *Handler) isSquadLeaderReady(ctx context.Context, issue db.Issue) bool {
 		return false
 	}
 	agent, err := h.Queries.GetAgent(ctx, squad.LeaderID)
-	if err != nil || !agent.RuntimeID.Valid || agent.ArchivedAt.Valid {
+	if err != nil {
 		return false
 	}
-	return true
+	ready, _, err := service.AgentReadiness(ctx, h.Queries, agent)
+	if err != nil {
+		// Fail closed when we can't tell — same posture as the rest of
+		// this function (any error path returns false).
+		return false
+	}
+	return ready
 }
 
 // enqueueSquadLeaderTask triggers the squad leader agent for an issue assigned to a squad.
