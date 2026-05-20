@@ -44,9 +44,13 @@ export function ThinkingPicker({
   const [open, setOpen] = useState(false);
 
   const selected = value ? levels.find((l) => l.value === value) : undefined;
+  // Unknown-but-set value (model swap that dropped the option, CLI upgrade
+  // that trimmed the catalog): show the raw token so the user can see what
+  // is actually persisted and clear it, rather than silently labelling it
+  // "Default" when the backend would still send the stale value.
   const triggerLabel = selected
     ? selected.label
-    : t(($) => $.pickers.thinking_default);
+    : value || t(($) => $.pickers.thinking_default);
   const triggerTitle = t(($) => $.pickers.thinking_tooltip, {
     value: triggerLabel,
   });
