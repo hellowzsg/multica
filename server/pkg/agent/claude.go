@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -67,14 +68,21 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 		cmd.Dir = opts.Cwd
 	}
 
-	// Skill isolation. The default ("ignore") points CLAUDE_CONFIG_DIR at an
-	// empty per-run scratch dir so `claude` cannot discover the host user's
+	// Skill isolation. The default ("ignore") points CLAUDE_CONFIG_DIR at a
+	// per-run scratch dir that mirrors `~/.claude/` as symlinks — except for
+	// `skills/`, which is omitted so the CLI cannot discover the host user's
 	// `~/.claude/skills/`. A single broken skill on one operator's machine
 	// crashes the CLI before it ever reads stdin (GitHub #3052: silent
 	// "broken pipe" exits), so shared / team agents default to isolation.
-	// "merge" is the explicit opt-in for personal agents that want to keep
-	// inheriting local skills. Workspace skills (`{cwd}/.claude/skills/`)
-	// are loaded by the CLI from cwd regardless and are not affected.
+	// Everything else under `~/.claude/` — including the Linux/Windows
+	// `.credentials.json` login token, `settings.json`, `agents/`,
+	// `commands/`, `plugins/`, etc. — is symlinked through so Claude
+	// authentication and global config keep working without an
+	// `ANTHROPIC_API_KEY`. "merge" is the explicit opt-in for personal
+	// agents that want host-machine skills back; the env var is left
+	// alone and the CLI walks `~/.claude/` directly. Workspace skills
+	// (`{cwd}/.claude/skills/`) load from cwd regardless and are not
+	// affected by either mode.
 	isolateClaudeConfig := opts.SkillsLocal != "merge"
 	var claudeConfigDir string
 	var claudeConfigCleanup func()
@@ -647,12 +655,26 @@ func isFilteredChildEnvKey(key string) bool {
 		strings.HasPrefix(key, "CLAUDE_CODE_")
 }
 
-// newIsolatedClaudeConfigDir creates an empty per-run scratch directory used
-// as CLAUDE_CONFIG_DIR when the agent opted out of host-machine skill
-// merging. The dir is placed under the task workdir when available so it
-// lives and dies with the task's storage allocation; otherwise it falls
-// back to the OS temp dir. The returned cleanup removes the directory and
-// is safe to call from any goroutine exactly once.
+// newIsolatedClaudeConfigDir creates a per-run scratch directory used as
+// CLAUDE_CONFIG_DIR when the agent opted out of host-machine skill merging.
+// The dir is placed under the task workdir when available so it lives and
+// dies with the task's storage allocation; otherwise it falls back to the
+// OS temp dir.
+//
+// The dir is NOT empty: every entry from the operator's `~/.claude/` is
+// symlinked through *except* `skills/`. That preserves Claude Code's login
+// state (`.credentials.json` on Linux/Windows), global settings, plugins,
+// agents, commands, output styles, todos, etc. — which all live in this
+// directory and would otherwise be invisible to the isolated child — while
+// still keeping the user-global skills directory off the CLI's discovery
+// path. Without this passthrough, switching default mode from "merge" to
+// "ignore" would force every Claude agent on a non-API-key host to
+// re-authenticate, breaking the documented "run `claude` once to log in"
+// install flow.
+//
+// The returned cleanup removes the scratch directory; symlinks are unlinked,
+// real `~/.claude/` files are untouched. Safe to call from any goroutine
+// exactly once.
 func newIsolatedClaudeConfigDir(taskCwd string) (string, func(), error) {
 	parent := taskCwd
 	if parent == "" {
@@ -671,13 +693,45 @@ func newIsolatedClaudeConfigDir(taskCwd string) (string, func(), error) {
 			return "", nil, err
 		}
 	}
+
+	if home, herr := os.UserHomeDir(); herr == nil {
+		// Best effort. If the host has no `~/.claude/`, there is nothing to
+		// mirror and the user is presumably on env-var auth; if individual
+		// symlinks fail, the CLI loses that one config item but continues.
+		_ = mirrorHostClaudeExceptSkills(filepath.Join(home, ".claude"), dir)
+	}
+
 	cleanup := func() {
 		// Best effort — caller logs through normal channels if cleanup fails
-		// (a leftover empty config dir is non-fatal; the GC sweeper that
-		// reclaims orphaned task workdirs will catch it too).
+		// (a leftover scratch dir is non-fatal; the GC sweeper that reclaims
+		// orphaned task workdirs will catch it too). RemoveAll unlinks
+		// symlinks without following them, so real `~/.claude/` files are
+		// not touched.
 		_ = os.RemoveAll(dir)
 	}
 	return dir, cleanup, nil
+}
+
+// mirrorHostClaudeExceptSkills symlinks every direct entry under hostClaudeDir
+// into destDir, skipping `skills/`. Errors on individual entries are
+// swallowed: a missing piece of host config is recoverable (Claude Code will
+// either use defaults or report a specific auth error), but a broken host
+// skill is not — and skipping `skills/` is the whole reason this helper
+// exists.
+func mirrorHostClaudeExceptSkills(hostClaudeDir, destDir string) error {
+	entries, err := os.ReadDir(hostClaudeDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Name() == "skills" {
+			continue
+		}
+		src := filepath.Join(hostClaudeDir, entry.Name())
+		dst := filepath.Join(destDir, entry.Name())
+		_ = os.Symlink(src, dst)
+	}
+	return nil
 }
 
 // blockedArgMode specifies whether a blocked arg takes a value or is standalone.

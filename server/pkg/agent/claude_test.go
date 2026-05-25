@@ -838,14 +838,12 @@ func TestNewIsolatedClaudeConfigDirCreatesAndCleansUp(t *testing.T) {
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		t.Fatalf("expected created dir to exist, stat err=%v", err)
 	}
-	// The dir must be empty so `claude` cannot inherit any host-machine
-	// skills/agents/commands by accident.
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read isolated dir: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("expected empty isolated dir, got %d entries", len(entries))
+	// The dir may contain symlinks mirrored from the host's ~/.claude/ (auth
+	// token, settings, etc. — see mirrorHostClaudeExceptSkills). What it must
+	// NOT contain is a `skills/` entry; that is the entire point of the
+	// isolation. Mirroring behaviour is exercised in dedicated tests below.
+	if _, err := os.Lstat(filepath.Join(dir, "skills")); !os.IsNotExist(err) {
+		t.Fatalf("expected no skills/ entry in isolated dir, stat err=%v", err)
 	}
 
 	// Cleanup is idempotent (Execute may double-defer in error paths).
@@ -853,6 +851,89 @@ func TestNewIsolatedClaudeConfigDirCreatesAndCleansUp(t *testing.T) {
 	cleanup()
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("expected dir removed, stat err=%v", err)
+	}
+}
+
+// TestMirrorHostClaudeExceptSkills_PassesAuthAndSkipsSkills locks in the
+// invariant Elon flagged in review: the isolation must not also isolate the
+// Claude login token. Mirror reaches every non-skills entry — including
+// `.credentials.json`, the Linux/Windows store for the OAuth token — so a
+// host that has only "run `claude` to log in" (no ANTHROPIC_API_KEY) still
+// authenticates inside the isolated config dir.
+func TestMirrorHostClaudeExceptSkills_PassesAuthAndSkipsSkills(t *testing.T) {
+	t.Parallel()
+
+	host := t.TempDir()
+	// Populate a realistic-ish ~/.claude/ layout.
+	for _, sub := range []string{"skills", "agents", "commands", "plugins"} {
+		if err := os.MkdirAll(filepath.Join(host, sub), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", sub, err)
+		}
+	}
+	// A broken skill in `skills/`: if the mirror passes it through, the
+	// regression Elon's review highlighted is back.
+	if err := os.WriteFile(filepath.Join(host, "skills", "broken.md"), []byte("frontmatter-corrupt"), 0o644); err != nil {
+		t.Fatalf("write broken skill: %v", err)
+	}
+	// The OAuth credential file is the asset the reviewer specifically flagged.
+	if err := os.WriteFile(filepath.Join(host, ".credentials.json"), []byte(`{"token":"abc"}`), 0o600); err != nil {
+		t.Fatalf("write credentials: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(host, "settings.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	dest := t.TempDir()
+	if err := mirrorHostClaudeExceptSkills(host, dest); err != nil {
+		t.Fatalf("mirror: %v", err)
+	}
+
+	// skills/ must be absent — claude would otherwise discover the broken
+	// host skill through the symlink and crash before reading stdin (#3052).
+	if _, err := os.Lstat(filepath.Join(dest, "skills")); !os.IsNotExist(err) {
+		t.Fatalf("expected skills/ to be skipped, got stat err=%v", err)
+	}
+
+	// Everything else must reach the isolated dir as a symlink with the
+	// same contents as the host file. We resolve through the symlink to
+	// confirm the CLI sees real bytes, not a broken link.
+	for _, expected := range []string{".credentials.json", "settings.json", "agents", "commands", "plugins"} {
+		dst := filepath.Join(dest, expected)
+		info, err := os.Lstat(dst)
+		if err != nil {
+			t.Fatalf("expected %s mirrored, stat err=%v", expected, err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("expected %s to be a symlink, got mode %v", expected, info.Mode())
+		}
+	}
+
+	// The credential file should round-trip — claude reading
+	// $CLAUDE_CONFIG_DIR/.credentials.json must see the live host token.
+	got, err := os.ReadFile(filepath.Join(dest, ".credentials.json"))
+	if err != nil {
+		t.Fatalf("read mirrored credentials: %v", err)
+	}
+	if string(got) != `{"token":"abc"}` {
+		t.Fatalf("mirrored credentials content drifted, got %q", got)
+	}
+}
+
+// TestMirrorHostClaudeExceptSkills_MissingHostDirIsNoop documents that a host
+// with no `~/.claude/` (env-var-auth-only setups) is a supported state, not
+// an error. The isolated dir simply stays empty.
+func TestMirrorHostClaudeExceptSkills_MissingHostDirIsNoop(t *testing.T) {
+	t.Parallel()
+
+	dest := t.TempDir()
+	err := mirrorHostClaudeExceptSkills(filepath.Join(t.TempDir(), "nope"), dest)
+	if err == nil {
+		t.Fatal("expected a read error for missing host dir")
+	}
+	// dest must remain untouched (no skills/, no other entries).
+	entries, _ := os.ReadDir(dest)
+	if len(entries) != 0 {
+		t.Fatalf("expected empty dest on missing host, got %d entries", len(entries))
 	}
 }
 

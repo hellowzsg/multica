@@ -562,10 +562,18 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	skillsLocal := normalizeSkillsLocal(req.SkillsLocal)
-	if !isValidSkillsLocal(skillsLocal) {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("skills_local %q is invalid (expected \"ignore\" or \"merge\")", req.SkillsLocal))
-		return
+	// Request validation is strict: a missing field defaults to "ignore", but a
+	// present-but-bogus value must 400 rather than silently normalize. The
+	// drift-safe normalize is only for on-read coercion of stored values
+	// (normalizeSkillsLocal) — applying it to request input would mask client
+	// typos as a successful create.
+	skillsLocal := "ignore"
+	if req.SkillsLocal != "" {
+		if !isValidSkillsLocal(req.SkillsLocal) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("skills_local %q is invalid (expected \"ignore\" or \"merge\")", req.SkillsLocal))
+			return
+		}
+		skillsLocal = req.SkillsLocal
 	}
 
 	// Probe workspace agent count BEFORE the insert so the funnel has a
@@ -868,12 +876,15 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		params.Model = pgtype.Text{String: *req.Model, Valid: true}
 	}
 	if req.SkillsLocal != nil {
-		value := normalizeSkillsLocal(*req.SkillsLocal)
-		if !isValidSkillsLocal(value) {
+		// PATCH is strictly opt-in: nil means no change. A non-nil value must
+		// validate as-is — normalizing here would let garbage silently land as
+		// "ignore" and hide a client bug. The drift-safe coercion lives in
+		// normalizeSkillsLocal for on-read use only.
+		if !isValidSkillsLocal(*req.SkillsLocal) {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("skills_local %q is invalid (expected \"ignore\" or \"merge\")", *req.SkillsLocal))
 			return
 		}
-		params.SkillsLocal = pgtype.Text{String: value, Valid: true}
+		params.SkillsLocal = pgtype.Text{String: *req.SkillsLocal, Valid: true}
 	}
 
 	// thinking_level handling (MUL-2339). Tri-state semantics:

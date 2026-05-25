@@ -240,7 +240,7 @@
       "search_placeholder": "搜索 skill…",
       "local_label": "允许使用本机已安装的 Skill",
       "local_hint_off": "关闭 —— 智能体只使用工作区内的 skill。更安全的默认值，推荐用于共享智能体。",
-      "local_hint_on": "开启 —— 运行时会同时合并本机用户级 skill 目录（例如 ~/.claude/skills/）。本机某个 skill 出问题时可能导致该智能体启动失败。"
+      "local_hint_on": "开启 —— 对支持该设置的运行时（目前是 Claude Code），运行时会同时合并本机用户级 skill 目录（例如 ~/.claude/skills/）。本机某个 skill 出问题时可能导致该智能体启动失败。其他运行时会忽略该设置。"
     },
     "avatar": {
       "change_aria": "更换头像",
@@ -290,7 +290,7 @@
       "import_hint": "导入会在工作区创建一份副本，团队可以编辑和复用。",
       "local_label": "允许使用本机已安装的 Skill",
       "local_hint_off": "关闭 —— 智能体只使用工作区 skill。更安全的默认值，推荐用于共享智能体。",
-      "local_hint_on": "开启 —— 运行时会同时合并本机用户级 skill 目录（例如 ~/.claude/skills/）。本机某个 skill 出问题可能导致该智能体启动失败。",
+      "local_hint_on": "开启 —— 对支持该设置的运行时（目前是 Claude Code），运行时会同时合并本机用户级 skill 目录（例如 ~/.claude/skills/）。本机某个 skill 出问题可能导致该智能体启动失败。其他运行时会忽略该设置。",
       "local_saved_toast": "已保存 Skill 合并设置",
       "local_save_failed_toast": "保存 Skill 合并设置失败",
       "empty_title": "尚未分配 skill",
