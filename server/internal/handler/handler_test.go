@@ -2624,6 +2624,121 @@ func TestBacklogToTodoTriggersAgent(t *testing.T) {
 	testHandler.DeleteIssue(httptest.NewRecorder(), cleanupReq)
 }
 
+// TestBacklogToTodoByAgentTriggersDifferentAssignee verifies that the
+// documented sub-task chain works: when an agent (parent / Step 1) promotes
+// a backlog issue assigned to a different agent (child / Step 2), the
+// child's task is enqueued. Previously the backlog→active trigger was
+// gated on `actorType == "member"`, which silently dropped agent-driven
+// promotions and broke the serial sub-task workflow.
+func TestBacklogToTodoByAgentTriggersDifferentAssignee(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+
+	// Parent agent (the actor) + child agent (the assignee).
+	parentAgent := createHandlerTestAgent(t, "Backlog Parent Agent", nil)
+	childAgent := createHandlerTestAgent(t, "Backlog Child Agent", nil)
+	parentTask := createHandlerTestTaskForAgent(t, parentAgent)
+
+	// Create a backlog issue assigned to the child agent — should NOT trigger
+	// on creation (backlog parking-lot rule).
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "Serial sub-task Step 2",
+		"status":        "backlog",
+		"assignee_type": "agent",
+		"assignee_id":   childAgent,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var created IssueResponse
+	json.NewDecoder(w.Body).Decode(&created)
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, created.ID)
+		testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, created.ID)
+	})
+
+	// Parent agent promotes backlog → todo on behalf of the X-Task it is
+	// currently running. Must enqueue exactly one task for the child agent.
+	w = httptest.NewRecorder()
+	req = newRequest("PUT", "/api/issues/"+created.ID, map[string]any{"status": "todo"})
+	req = withURLParam(req, "id", created.ID)
+	req.Header.Set("X-Agent-ID", parentAgent)
+	req.Header.Set("X-Task-ID", parentTask)
+	testHandler.UpdateIssue(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("UpdateIssue: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var childTasks int
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
+		created.ID, childAgent,
+	).Scan(&childTasks); err != nil {
+		t.Fatalf("failed to count child tasks: %v", err)
+	}
+	if childTasks != 1 {
+		t.Fatalf("expected exactly 1 task enqueued for child agent after agent-driven backlog→todo, got %d", childTasks)
+	}
+}
+
+// TestBacklogToTodoByAgentDoesNotSelfTrigger verifies the self-loop guard:
+// an agent flipping its own backlog issue to an active status must NOT
+// enqueue itself. Without this guard the agent would re-trigger every
+// time it completed a run, then immediately re-enter the same path.
+func TestBacklogToTodoByAgentDoesNotSelfTrigger(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+
+	selfAgent := createHandlerTestAgent(t, "Backlog Self Agent", nil)
+	selfTask := createHandlerTestTaskForAgent(t, selfAgent)
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "Self-promoted backlog",
+		"status":        "backlog",
+		"assignee_type": "agent",
+		"assignee_id":   selfAgent,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var created IssueResponse
+	json.NewDecoder(w.Body).Decode(&created)
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, created.ID)
+		testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, created.ID)
+	})
+
+	// Self-promotion: actor agent == assignee agent. Must NOT enqueue.
+	w = httptest.NewRecorder()
+	req = newRequest("PUT", "/api/issues/"+created.ID, map[string]any{"status": "todo"})
+	req = withURLParam(req, "id", created.ID)
+	req.Header.Set("X-Agent-ID", selfAgent)
+	req.Header.Set("X-Task-ID", selfTask)
+	testHandler.UpdateIssue(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("UpdateIssue: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var tasks int
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
+		created.ID, selfAgent,
+	).Scan(&tasks); err != nil {
+		t.Fatalf("failed to count tasks: %v", err)
+	}
+	if tasks != 0 {
+		t.Fatalf("expected no self-trigger after agent promoted its own backlog issue, got %d queued tasks", tasks)
+	}
+}
+
 func TestDaemonRegisterMissingWorkspaceReturns404(t *testing.T) {
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/daemon/register", bytes.NewBufferString(`{

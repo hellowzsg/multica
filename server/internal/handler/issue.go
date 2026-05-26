@@ -2239,11 +2239,17 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Trigger the assigned agent when a member moves an issue out of backlog.
-	// Backlog acts as a parking lot — moving to an active status signals the
-	// issue is ready for work.
-	if statusChanged && !assigneeChanged && actorType == "member" &&
-		prevIssue.Status == "backlog" && issue.Status != "done" && issue.Status != "cancelled" {
+	// Trigger the assigned agent when an issue moves out of backlog. Backlog
+	// acts as a parking lot — moving to an active status signals the issue is
+	// ready for work. Agent actors are allowed here so the documented
+	// serial sub-task workflow works (parent agent finishes Step 1, then
+	// promotes Step 2 from backlog→todo for a different child agent). The
+	// only excluded case is an agent promoting an issue assigned to itself,
+	// which would self-loop on every run; uuidToString returns "" for an
+	// unset assignee, so an unassigned issue can never accidentally match.
+	if statusChanged && !assigneeChanged &&
+		prevIssue.Status == "backlog" && issue.Status != "done" && issue.Status != "cancelled" &&
+		!isAgentSelfPromotion(actorType, actorID, issue) {
 		if h.isAgentAssigneeReady(r.Context(), issue) {
 			h.TaskService.EnqueueTaskForIssue(r.Context(), issue)
 		}
@@ -2371,6 +2377,22 @@ func (h *Handler) shouldEnqueueOnComment(ctx context.Context, issue db.Issue) bo
 		return false
 	}
 	return true
+}
+
+// isAgentSelfPromotion reports whether the actor is an agent promoting an
+// issue assigned to itself. This is the one case the backlog→active
+// transition must skip to avoid an infinite self-trigger loop: an agent
+// flipping its own backlog issue to todo would immediately re-enqueue
+// itself, complete its run, flip again, and so on. Cross-agent and
+// member-driven promotions are fine and must still fire.
+func isAgentSelfPromotion(actorType, actorID string, issue db.Issue) bool {
+	if actorType != "agent" {
+		return false
+	}
+	if !issue.AssigneeType.Valid || issue.AssigneeType.String != "agent" {
+		return false
+	}
+	return actorID == uuidToString(issue.AssigneeID)
 }
 
 // isAgentAssigneeReady checks if an issue is assigned to an active agent
@@ -2667,9 +2689,13 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Trigger agent when moving out of backlog (batch).
-		if statusChanged && !assigneeChanged && actorType == "member" &&
-			prevIssue.Status == "backlog" && issue.Status != "done" && issue.Status != "cancelled" {
+		// Trigger agent when moving out of backlog (batch). Mirrors the
+		// single-update path above — agent actors are allowed so serial
+		// sub-task chains work, with the self-promotion guard preventing
+		// an agent from triggering itself.
+		if statusChanged && !assigneeChanged &&
+			prevIssue.Status == "backlog" && issue.Status != "done" && issue.Status != "cancelled" &&
+			!isAgentSelfPromotion(actorType, actorID, issue) {
 			if h.isAgentAssigneeReady(r.Context(), issue) {
 				h.TaskService.EnqueueTaskForIssue(r.Context(), issue)
 			}
