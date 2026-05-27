@@ -762,12 +762,169 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 		involvesUserFilter = id
 	}
 
+	// assignee param — supports {me} token to resolve current user as member assignee.
+	var assigneeTypeFromParam, assigneeIDFromParam string
+	if raw := r.URL.Query().Get("assignee"); raw != "" {
+		resolved := resolvePersonParam(raw, requestUserID(r))
+		aType, aID, aOk := splitActorRef(resolved)
+		if !aOk {
+			writeError(w, http.StatusBadRequest, "invalid assignee format, expected type:id")
+			return
+		}
+		if _, uOk := parseUUIDOrBadRequest(w, aID, "assignee"); !uOk {
+			return
+		}
+		assigneeTypeFromParam = aType
+		assigneeIDFromParam = aID
+	}
+
+	// creator param — supports {me} token.
+	var creatorFromParam string
+	if raw := r.URL.Query().Get("creator"); raw != "" {
+		resolved := resolvePersonParam(raw, requestUserID(r))
+		_, cID, cOk := splitActorRef(resolved)
+		if !cOk {
+			writeError(w, http.StatusBadRequest, "invalid creator format, expected type:id")
+			return
+		}
+		if _, uOk := parseUUIDOrBadRequest(w, cID, "creator"); !uOk {
+			return
+		}
+		creatorFromParam = cID
+	}
+
+	// involves param — supports {me} token. Builds a 6-branch OR subquery.
+	var involvesParam string
+	var involvesUUID pgtype.UUID
+	if raw := r.URL.Query().Get("involves"); raw != "" {
+		resolved := resolvePersonParam(raw, requestUserID(r))
+		_, iID, iOk := splitActorRef(resolved)
+		if !iOk {
+			writeError(w, http.StatusBadRequest, "invalid involves format, expected type:id")
+			return
+		}
+		id, uOk := parseUUIDOrBadRequest(w, iID, "involves")
+		if !uOk {
+			return
+		}
+		involvesParam = iID
+		involvesUUID = id
+		_ = involvesParam // used below in dynamic SQL
+	}
+
+	// assignee_type — comma-separated assignee types (agent, squad, member).
+	var assigneeTypes []string
+	if raw := r.URL.Query().Get("assignee_type"); raw != "" {
+		for _, t := range strings.Split(raw, ",") {
+			if s := strings.TrimSpace(t); s != "" {
+				assigneeTypes = append(assigneeTypes, s)
+			}
+		}
+	}
+
+	// statuses — comma-separated statuses for multi-status filtering.
+	var statusesFilter []string
+	if raw := r.URL.Query().Get("statuses"); raw != "" {
+		for _, s := range strings.Split(raw, ",") {
+			if v := strings.TrimSpace(s); v != "" {
+				statusesFilter = append(statusesFilter, v)
+			}
+		}
+	}
+
+	// priorities — comma-separated priorities for multi-priority filtering.
+	var prioritiesFilter []string
+	if raw := r.URL.Query().Get("priorities"); raw != "" {
+		for _, p := range strings.Split(raw, ",") {
+			if v := strings.TrimSpace(p); v != "" {
+				prioritiesFilter = append(prioritiesFilter, v)
+			}
+		}
+	}
+
+	// assignee_filters — comma-separated type:id pairs for compound assignee filtering.
+	type actorRef struct {
+		actorType string
+		actorID   string
+	}
+	var assigneeFilters []actorRef
+	if raw := r.URL.Query().Get("assignee_filters"); raw != "" {
+		for _, pair := range strings.Split(raw, ",") {
+			if s := strings.TrimSpace(pair); s != "" {
+				aType, aID, aOk := splitActorRef(s)
+				if !aOk {
+					writeError(w, http.StatusBadRequest, "invalid assignee_filters entry: "+s)
+					return
+				}
+				if _, uOk := parseUUIDOrBadRequest(w, aID, "assignee_filters"); !uOk {
+					return
+				}
+				assigneeFilters = append(assigneeFilters, actorRef{aType, aID})
+			}
+		}
+	}
+
+	includeNoAssignee := r.URL.Query().Get("include_no_assignee") == "true"
+
+	// creator_filters — comma-separated type:id pairs for compound creator filtering.
+	var creatorFilters []actorRef
+	if raw := r.URL.Query().Get("creator_filters"); raw != "" {
+		for _, pair := range strings.Split(raw, ",") {
+			if s := strings.TrimSpace(pair); s != "" {
+				cType, cID, cOk := splitActorRef(s)
+				if !cOk {
+					writeError(w, http.StatusBadRequest, "invalid creator_filters entry: "+s)
+					return
+				}
+				if _, uOk := parseUUIDOrBadRequest(w, cID, "creator_filters"); !uOk {
+					return
+				}
+				creatorFilters = append(creatorFilters, actorRef{cType, cID})
+			}
+		}
+	}
+
+	// project_ids — comma-separated project UUIDs.
+	var projectIdsFilter []pgtype.UUID
+	if raw := r.URL.Query().Get("project_ids"); raw != "" {
+		for _, s := range strings.Split(raw, ",") {
+			if v := strings.TrimSpace(s); v != "" {
+				id, ok := parseUUIDOrBadRequest(w, v, "project_ids")
+				if !ok {
+					return
+				}
+				projectIdsFilter = append(projectIdsFilter, id)
+			}
+		}
+	}
+
+	includeNoProject := r.URL.Query().Get("include_no_project") == "true"
+
+	// label_ids — comma-separated label UUIDs.
+	var labelIdsFilter []pgtype.UUID
+	if raw := r.URL.Query().Get("label_ids"); raw != "" {
+		for _, s := range strings.Split(raw, ",") {
+			if v := strings.TrimSpace(s); v != "" {
+				id, ok := parseUUIDOrBadRequest(w, v, "label_ids")
+				if !ok {
+					return
+				}
+				labelIdsFilter = append(labelIdsFilter, id)
+			}
+		}
+	}
+
 	metadataFilter, ok := parseMetadataFilterParam(w, r.URL.Query().Get("metadata"))
 	if !ok {
 		return
 	}
 
 	// open_only=true returns all non-done/cancelled issues (no limit).
+	// NOTE: The open_only fast path uses a sqlc-generated query and does NOT
+	// support the newer filter params (assignee, creator, involves, assignee_type,
+	// statuses, priorities, assignee_filters, creator_filters, project_ids,
+	// label_ids). This is acceptable — open_only is used only by specific
+	// internal queries that don't need these filters.
 	if r.URL.Query().Get("open_only") == "true" {
 		issues, err := h.Queries.ListOpenIssues(ctx, db.ListOpenIssuesParams{
 			WorkspaceID:    wsUUID,
@@ -929,6 +1086,95 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
           AND a.owner_id     = %[1]s::uuid
     ))
 )`, ref))
+	}
+
+	// --- New filter params (dynamic SQL only, not in open_only fast path) ---
+
+	if assigneeTypeFromParam != "" {
+		where = append(where, fmt.Sprintf("i.assignee_type = %s", addArg(assigneeTypeFromParam)))
+		where = append(where, fmt.Sprintf("i.assignee_id = %s::uuid", addArg(assigneeIDFromParam)))
+	}
+	if creatorFromParam != "" {
+		where = append(where, fmt.Sprintf("i.creator_id = %s::uuid", addArg(creatorFromParam)))
+	}
+	if involvesParam != "" {
+		ref := addArg(involvesUUID)
+		where = append(where, fmt.Sprintf(`(
+    (i.assignee_type = 'member' AND i.assignee_id = %[1]s::uuid)
+    OR (i.creator_id = %[1]s::uuid)
+    OR (i.assignee_type = 'agent' AND i.assignee_id IN (
+       SELECT a.id FROM agent a
+        WHERE a.workspace_id = $1
+          AND a.owner_id     = %[1]s::uuid
+    ))
+    OR (i.assignee_type = 'squad' AND i.assignee_id IN (
+       SELECT sm.squad_id
+         FROM squad_member sm
+         JOIN squad s ON s.id = sm.squad_id
+        WHERE s.workspace_id = $1
+          AND sm.member_type = 'member'
+          AND sm.member_id   = %[1]s::uuid
+       UNION
+       SELECT s.id
+         FROM squad s
+         JOIN agent a ON a.id = s.leader_id
+        WHERE s.workspace_id = $1
+          AND a.workspace_id = $1
+          AND a.owner_id     = %[1]s::uuid
+       UNION
+       SELECT sm.squad_id
+         FROM squad_member sm
+         JOIN squad s ON s.id = sm.squad_id
+         JOIN agent a ON a.id = sm.member_id
+        WHERE s.workspace_id = $1
+          AND sm.member_type = 'agent'
+          AND a.workspace_id = $1
+          AND a.owner_id     = %[1]s::uuid
+    ))
+)`, ref))
+	}
+	if len(assigneeTypes) > 0 {
+		where = append(where, fmt.Sprintf("i.assignee_type = ANY(%s::text[])", addArg(assigneeTypes)))
+	}
+	if len(statusesFilter) > 0 {
+		where = append(where, fmt.Sprintf("i.status = ANY(%s::text[])", addArg(statusesFilter)))
+	}
+	if len(prioritiesFilter) > 0 {
+		where = append(where, fmt.Sprintf("i.priority = ANY(%s::text[])", addArg(prioritiesFilter)))
+	}
+	if len(assigneeFilters) > 0 || includeNoAssignee {
+		var parts []string
+		for _, af := range assigneeFilters {
+			tRef := addArg(af.actorType)
+			idRef := addArg(af.actorID)
+			parts = append(parts, fmt.Sprintf("(i.assignee_type = %s AND i.assignee_id = %s::uuid)", tRef, idRef))
+		}
+		if includeNoAssignee {
+			parts = append(parts, "(i.assignee_type IS NULL AND i.assignee_id IS NULL)")
+		}
+		where = append(where, "("+strings.Join(parts, " OR ")+")")
+	}
+	if len(creatorFilters) > 0 {
+		var parts []string
+		for _, cf := range creatorFilters {
+			tRef := addArg(cf.actorType)
+			idRef := addArg(cf.actorID)
+			parts = append(parts, fmt.Sprintf("(i.creator_type = %s AND i.creator_id = %s::uuid)", tRef, idRef))
+		}
+		where = append(where, "("+strings.Join(parts, " OR ")+")")
+	}
+	if len(projectIdsFilter) > 0 || includeNoProject {
+		var parts []string
+		if len(projectIdsFilter) > 0 {
+			parts = append(parts, fmt.Sprintf("i.project_id = ANY(%s::uuid[])", addArg(projectIdsFilter)))
+		}
+		if includeNoProject {
+			parts = append(parts, "i.project_id IS NULL")
+		}
+		where = append(where, "("+strings.Join(parts, " OR ")+")")
+	}
+	if len(labelIdsFilter) > 0 {
+		where = append(where, fmt.Sprintf("EXISTS (SELECT 1 FROM issue_to_label itl WHERE itl.issue_id = i.id AND itl.label_id = ANY(%s::uuid[]))", addArg(labelIdsFilter)))
 	}
 
 	whereSql := strings.Join(where, " AND ")
@@ -2998,4 +3244,21 @@ func (h *Handler) BatchDeleteIssues(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("batch delete issues", append(logger.RequestAttrs(r), "count", deleted)...)
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted})
+}
+
+// resolvePersonParam resolves {me} tokens. Returns (resolvedValue, needsMeButNoSession).
+func resolvePersonParam(raw, userID string) string {
+	if raw == "{me}" {
+		return "member:" + userID
+	}
+	return raw
+}
+
+// splitActorRef parses a "type:id" string into its components.
+func splitActorRef(s string) (actorType, actorID string, ok bool) {
+	parts := strings.SplitN(s, ":", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }

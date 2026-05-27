@@ -7,6 +7,8 @@ import type {
   CreateAgentFromTemplateResponse,
   GroupedIssuesResponse,
   ListIssuesResponse,
+  ListViewsResponse,
+  SavedView,
   ListWebhookDeliveriesResponse,
   Squad,
   TimelineEntry,
@@ -175,6 +177,53 @@ export const ListIssuesResponseSchema = z.object({
 export const EMPTY_LIST_ISSUES_RESPONSE: ListIssuesResponse = {
   issues: [],
   total: 0,
+};
+
+// ---------------------------------------------------------------------------
+// Saved views — `/api/views` CRUD. Lenient by the same rules as IssueSchema:
+// string enums stay `z.string()`, optional fields default, `.loose()` passes
+// unknown server-side fields. `filters` is a free-form JSONB bag — schema
+// only enforces it's a record, not its inner structure.
+// ---------------------------------------------------------------------------
+
+export const SavedViewSchema = z.object({
+  id: z.string().default(""),
+  workspace_id: z.string().default(""),
+  creator_id: z.string().nullable().default(null),
+  name: z.string().default(""),
+  page: z.string().default("issues"),
+  project_id: z.string().nullable().default(null),
+  filters: z.record(z.string(), z.unknown()).default({}),
+  position: z.number().default(0),
+  shared: z.boolean().default(false),
+  is_default: z.boolean().default(false),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+}).loose();
+
+export const ListViewsResponseSchema = z.object({
+  views: z.array(SavedViewSchema).default([]),
+  total: z.number().default(0),
+}).loose();
+
+export const EMPTY_LIST_VIEWS_RESPONSE: ListViewsResponse = {
+  views: [],
+  total: 0,
+};
+
+export const EMPTY_SAVED_VIEW: SavedView = {
+  id: "",
+  workspace_id: "",
+  creator_id: null,
+  name: "",
+  page: "issues",
+  project_id: null,
+  filters: {},
+  position: 0,
+  shared: false,
+  is_default: false,
+  created_at: "",
+  updated_at: "",
 };
 
 const IssueAssigneeGroupSchema = z.object({

@@ -4,6 +4,12 @@ import type {
   UpdateIssueRequest,
   GroupedIssuesResponse,
   ListIssuesResponse,
+  ListViewsResponse,
+  ListViewsParams,
+  CreateViewRequest,
+  UpdateViewRequest,
+  ReorderViewsRequest,
+  SavedView,
   SearchIssuesResponse,
   SearchProjectsResponse,
   UpdateMeRequest,
@@ -134,6 +140,8 @@ import {
   EMPTY_CREATE_AGENT_FROM_TEMPLATE_RESPONSE,
   EMPTY_GROUPED_ISSUES_RESPONSE,
   EMPTY_LIST_ISSUES_RESPONSE,
+  EMPTY_LIST_VIEWS_RESPONSE,
+  EMPTY_SAVED_VIEW,
   EMPTY_SQUAD,
   EMPTY_SQUAD_LIST,
   EMPTY_SQUAD_MEMBER_STATUS_LIST,
@@ -143,6 +151,8 @@ import {
   EMPTY_WEBHOOK_DELIVERY,
   GroupedIssuesResponseSchema,
   ListIssuesResponseSchema,
+  ListViewsResponseSchema,
+  SavedViewSchema,
   ListWebhookDeliveriesResponseSchema,
   RuntimeHourlyActivityListSchema,
   RuntimeUsageByAgentListSchema,
@@ -449,6 +459,22 @@ export class ApiClient {
     }
     if (params?.open_only) search.set("open_only", "true");
     if (params?.scheduled) search.set("scheduled", "true");
+    if (params?.assignee) search.set("assignee", params.assignee);
+    if (params?.creator) search.set("creator", params.creator);
+    if (params?.involves) search.set("involves", params.involves);
+    if (params?.assignee_type?.length) search.set("assignee_type", params.assignee_type.join(","));
+    if (params?.statuses?.length) search.set("statuses", params.statuses.join(","));
+    if (params?.priorities?.length) search.set("priorities", params.priorities.join(","));
+    if (params?.assignee_filters?.length) {
+      search.set("assignee_filters", params.assignee_filters.map((f) => `${f.type}:${f.id}`).join(","));
+    }
+    if (params?.include_no_assignee) search.set("include_no_assignee", "true");
+    if (params?.creator_filters?.length) {
+      search.set("creator_filters", params.creator_filters.map((f) => `${f.type}:${f.id}`).join(","));
+    }
+    if (params?.project_ids?.length) search.set("project_ids", params.project_ids.join(","));
+    if (params?.include_no_project) search.set("include_no_project", "true");
+    if (params?.label_ids?.length) search.set("label_ids", params.label_ids.join(","));
     if (params?.sort_by) search.set("sort", params.sort_by);
     if (params?.sort_direction) search.set("direction", params.sort_direction);
     const path = `/api/issues?${search}`;
@@ -1847,5 +1873,46 @@ export class ApiClient {
 
   async listIssuePullRequests(issueId: string): Promise<{ pull_requests: GitHubPullRequest[] }> {
     return this.fetch(`/api/issues/${issueId}/pull-requests`);
+  }
+
+  // Views
+  async listViews(params: ListViewsParams): Promise<ListViewsResponse> {
+    const search = new URLSearchParams({ page: params.page });
+    if (params.project_id) search.set("project_id", params.project_id);
+    const raw = await this.fetch<unknown>(`/api/views?${search}`);
+    return parseWithFallback(raw, ListViewsResponseSchema, EMPTY_LIST_VIEWS_RESPONSE, {
+      endpoint: "GET /api/views",
+    });
+  }
+
+  async createView(data: CreateViewRequest): Promise<SavedView> {
+    const raw = await this.fetch<unknown>("/api/views", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, SavedViewSchema, EMPTY_SAVED_VIEW, {
+      endpoint: "POST /api/views",
+    });
+  }
+
+  async updateView(id: string, data: UpdateViewRequest): Promise<SavedView> {
+    const raw = await this.fetch<unknown>(`/api/views/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, SavedViewSchema, EMPTY_SAVED_VIEW, {
+      endpoint: "PUT /api/views/{id}",
+    });
+  }
+
+  async deleteView(id: string): Promise<void> {
+    await this.fetch(`/api/views/${id}`, { method: "DELETE" });
+  }
+
+  async reorderViews(data: ReorderViewsRequest): Promise<void> {
+    await this.fetch("/api/views/reorder", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
   }
 }

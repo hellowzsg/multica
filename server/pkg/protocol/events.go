@@ -124,4 +124,10 @@ const (
 	EventPullRequestLinked         = "pull_request:linked"
 	EventPullRequestUpdated        = "pull_request:updated"
 	EventPullRequestUnlinked       = "pull_request:unlinked"
+
+	// Views
+	EventViewCreated   = "view:created"
+	EventViewUpdated   = "view:updated"
+	EventViewDeleted   = "view:deleted"
+	EventViewReordered = "view:reordered"
 )

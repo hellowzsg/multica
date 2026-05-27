@@ -498,6 +498,17 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				})
 			})
 
+			// Views
+			r.Route("/api/views", func(r chi.Router) {
+				r.Get("/", h.ListViews)
+				r.Post("/", h.CreateView)
+				r.Put("/reorder", h.ReorderViews)
+				r.Route("/{id}", func(r chi.Router) {
+					r.Put("/", h.UpdateView)
+					r.Delete("/", h.DeleteView)
+				})
+			})
+
 			// Pins
 			r.Route("/api/pins", func(r chi.Router) {
 				r.Get("/", h.ListPins)

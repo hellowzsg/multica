@@ -66,6 +66,20 @@ export interface ListIssuesParams {
   scheduled?: boolean;
   sort_by?: "position" | "priority" | "title" | "created_at" | "start_date" | "due_date";
   sort_direction?: "asc" | "desc";
+  // Views feature: person-type params supporting {me} token
+  assignee?: string;
+  creator?: string;
+  involves?: string;
+  // Views feature: filter params (match /api/issues/grouped parity)
+  assignee_type?: string[];
+  statuses?: IssueStatus[];
+  priorities?: IssuePriority[];
+  assignee_filters?: IssueActorRef[];
+  include_no_assignee?: boolean;
+  creator_filters?: IssueActorRef[];
+  project_ids?: string[];
+  include_no_project?: boolean;
+  label_ids?: string[];
 }
 
 export interface IssueActorRef {
@@ -199,4 +213,49 @@ export interface CreatePersonalAccessTokenResponse extends PersonalAccessToken {
 export interface PaginationParams {
   limit?: number;
   offset?: number;
+}
+
+// Views
+export interface SavedView {
+  id: string;
+  workspace_id: string;
+  creator_id: string | null;
+  name: string;
+  page: "issues" | "my_issues" | "project";
+  project_id: string | null;
+  filters: Record<string, unknown>;
+  position: number;
+  shared: boolean;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ListViewsParams {
+  page: "issues" | "my_issues" | "project";
+  project_id?: string;
+}
+
+export interface CreateViewRequest {
+  name: string;
+  page: "issues" | "my_issues" | "project";
+  project_id?: string;
+  filters?: Record<string, unknown>;
+  shared?: boolean;
+}
+
+export interface UpdateViewRequest {
+  name?: string;
+  filters?: Record<string, unknown>;
+  position?: number;
+  shared?: boolean;
+}
+
+export interface ReorderViewsRequest {
+  items: Array<{ id: string; position: number }>;
+}
+
+export interface ListViewsResponse {
+  views: SavedView[];
+  total: number;
 }
