@@ -678,7 +678,7 @@ export function IssueDisplayControls({
   const sortLabel = t(($) => $.display[SORT_LABEL_KEY[sortBy]]);
   const groupingLabel = t(($) => $.display[GROUPING_LABEL_KEY[grouping]]);
   const swimlaneGroupingLabel = t(($) => $.display[SWIMLANE_GROUPING_LABEL_KEY[swimlaneGrouping]]);
-  const controlButtonClass = "h-8 w-8 gap-1 px-0 text-muted-foreground md:w-auto md:px-3";
+  const controlButtonClass = "h-8 w-8 gap-1 px-0 text-muted-foreground md:h-7 md:w-auto md:px-2.5";
 
   return (
     <div className="flex items-center gap-1">
@@ -694,7 +694,7 @@ export function IssueDisplayControls({
                       size="sm"
                       className={
                         hasActiveFilters
-                          ? "h-8 w-8 gap-1 bg-brand px-0 text-white hover:bg-brand/90 md:w-auto md:px-3"
+                          ? "h-8 w-8 gap-1 bg-brand px-0 text-white hover:bg-brand/90 md:h-7 md:w-auto md:px-2.5"
                           : controlButtonClass
                       }
                     >
