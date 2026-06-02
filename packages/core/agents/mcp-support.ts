@@ -6,9 +6,18 @@
 // per-task wrapper preparer in `server/internal/daemon/execenv/` which
 // materialises `mcp.servers` into the synthesised config rather than going
 // through ExecOptions.
+//
+// Variant providers (codebuddy, claude-internal, codex-internal) inherit
+// from claude / codex backends via ProtocolFamily — they get MCP wiring
+// for free, and codebuddy's own CLI exposes the same `--mcp-config` flag.
+// gemini-internal is intentionally absent: the gemini backend does not
+// consume mcp_config, so neither does its variant.
 const MCP_SUPPORTED_PROVIDERS = new Set([
   "claude",
+  "claude-internal",
+  "codebuddy",
   "codex",
+  "codex-internal",
   "hermes",
   "kimi",
   "kiro",
