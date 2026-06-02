@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -91,7 +92,19 @@ const modelCacheTTL = 60 * time.Second
 // executablePath lets the caller point at a non-default binary; pass
 // "" to use the provider's default name on PATH.
 func ListModels(ctx context.Context, providerType, executablePath string) ([]Model, error) {
-	// Variant providers (codebuddy, claude-internal, codex-internal,
+	// codebuddy speaks the Claude Code wire protocol but exposes a
+	// different model catalog (Tencent-hosted GPT/Gemini/GLM/etc. on
+	// top of Anthropic models). Reusing claudeStaticModels() would
+	// hide every non-Anthropic option from the picker and break model
+	// selection — see issue context for PR #3094. Discover the live
+	// catalog from `codebuddy --help` instead, which prints all
+	// accepted --model values inline.
+	if providerType == "codebuddy" {
+		return cachedDiscovery(providerType, func() ([]Model, error) {
+			return discoverCodeBuddyModels(ctx, executablePath)
+		})
+	}
+	// Variant providers (claude-internal, codex-internal,
 	// gemini-internal) share the upstream model catalog verbatim, so
 	// route them through the family's discovery path.
 	switch ProtocolFamily(providerType) {
@@ -332,6 +345,88 @@ func isOpenAIReasoningSeriesID(id string) bool {
 }
 
 // ── Dynamic discovery ──
+
+// discoverCodeBuddyModels runs `codebuddy --help` and parses the
+// `--model <model>` option line, which CodeBuddy formats as:
+//
+//   --model <model>   Model for the current session. ... Currently
+//                     supported: (claude-sonnet-4.6, gpt-5.4, ...)
+//
+// CodeBuddy has no dedicated `models` subcommand and slash commands
+// (`/model list`) only work in interactive mode — passing them via
+// `-p` would be interpreted as a natural-language prompt and burn an
+// API call. The --help text is the only non-interactive source of
+// truth, so we scrape it.
+//
+// On any failure (CLI missing, format change, parse miss) we return
+// an empty list rather than falling back to claudeStaticModels(),
+// which would hide every non-Anthropic option from the picker.
+func discoverCodeBuddyModels(ctx context.Context, executablePath string) ([]Model, error) {
+	if executablePath == "" {
+		executablePath = "codebuddy"
+	}
+	if _, err := exec.LookPath(executablePath); err != nil {
+		return []Model{}, nil
+	}
+	runCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, executablePath, "--help")
+	hideAgentWindow(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return []Model{}, nil
+	}
+	return parseCodeBuddyHelpModels(string(out)), nil
+}
+
+// codeBuddyModelLineRegexp matches the parenthesised model list on
+// the `--model <model>` help line. We anchor on the literal token
+// "Currently supported:" to avoid matching the analogous text-to-image
+// / image-to-image / fallback-model lines that follow.
+var codeBuddyModelLineRegexp = regexp.MustCompile(`--model <model>[^\n]*Currently supported:\s*\(([^)]*)\)`)
+
+// codeBuddyVendorPrefixes maps known model-ID prefixes to the
+// upstream provider for grouping in the UI dropdown. Order matters:
+// "claude-haiku" is checked before "claude" wouldn't matter, but
+// keeping the table flat with simple HasPrefix avoids ambiguity.
+var codeBuddyVendorPrefixes = []struct {
+	prefix string
+	vendor string
+}{
+	{"claude-", "anthropic"},
+	{"gpt-", "openai"},
+	{"gemini-", "google"},
+	{"glm-", "zhipu"},
+	{"minimax-", "minimax"},
+	{"kimi-", "moonshot"},
+	{"deepseek-", "deepseek"},
+	{"hunyuan-", "tencent"},
+}
+
+func parseCodeBuddyHelpModels(helpOutput string) []Model {
+	m := codeBuddyModelLineRegexp.FindStringSubmatch(helpOutput)
+	if len(m) < 2 {
+		return []Model{}
+	}
+	var models []Model
+	seen := map[string]bool{}
+	for _, raw := range strings.Split(m[1], ",") {
+		id := strings.TrimSpace(raw)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		vendor := ""
+		for _, vp := range codeBuddyVendorPrefixes {
+			if strings.HasPrefix(id, vp.prefix) {
+				vendor = vp.vendor
+				break
+			}
+		}
+		models = append(models, Model{ID: id, Label: id, Provider: vendor})
+	}
+	return models
+}
 
 // discoverOpenCodeModels runs `opencode models` and parses its tabular
 // output. The CLI prints `provider/model` rows; we emit them verbatim

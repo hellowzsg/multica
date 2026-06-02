@@ -595,3 +595,76 @@ func TestCachedDiscovery(t *testing.T) {
 		t.Errorf("expected 1 underlying call due to cache, got %d", calls)
 	}
 }
+
+func TestParseCodeBuddyHelpModels(t *testing.T) {
+	// Trimmed to just the relevant `--help` lines from a real
+	// `codebuddy --help` invocation (v2.65.0). The function must
+	// match only the `--model <model>` line and ignore the analogous
+	// --text-to-image-model / --image-to-image-model / --fallback-model
+	// lines that appear immediately after.
+	input := `  --output-format <format>     Output format (only works with --print): "text" (default), "json"
+  --model <model>              Model for the current session. Please provide the model ID. Currently supported: (claude-sonnet-4.6, claude-4.5, claude-opus-4.6, gemini-3.1-pro, gpt-5.4, gpt-5.1-codex-mini, glm-5.0-turbo-ioa, minimax-m2.7-ioa, kimi-k2.5-ioa, deepseek-v3-2-volc-ioa, hunyuan-2.0-thinking-ioa)
+  --text-to-image-model <model>   Model for text-to-image generation
+  --image-to-image-model <model>  Model for image-to-image editing
+  --fallback-model <model>     Enable automatic fallback to specified model when default model is overloaded (only works with --print)
+`
+	models := parseCodeBuddyHelpModels(input)
+	if len(models) != 11 {
+		t.Fatalf("expected 11 models, got %d: %+v", len(models), models)
+	}
+	wantVendor := map[string]string{
+		"claude-sonnet-4.6":         "anthropic",
+		"claude-4.5":                "anthropic",
+		"claude-opus-4.6":           "anthropic",
+		"gemini-3.1-pro":            "google",
+		"gpt-5.4":                   "openai",
+		"gpt-5.1-codex-mini":        "openai",
+		"glm-5.0-turbo-ioa":         "zhipu",
+		"minimax-m2.7-ioa":          "minimax",
+		"kimi-k2.5-ioa":             "moonshot",
+		"deepseek-v3-2-volc-ioa":    "deepseek",
+		"hunyuan-2.0-thinking-ioa":  "tencent",
+	}
+	for _, m := range models {
+		if m.ID != m.Label {
+			t.Errorf("expected Label==ID for %q (UI fallback), got Label=%q", m.ID, m.Label)
+		}
+		want, ok := wantVendor[m.ID]
+		if !ok {
+			t.Errorf("unexpected model ID %q", m.ID)
+			continue
+		}
+		if m.Provider != want {
+			t.Errorf("model %q: expected vendor %q, got %q", m.ID, want, m.Provider)
+		}
+	}
+}
+
+func TestParseCodeBuddyHelpModelsEmptyOnNoMatch(t *testing.T) {
+	// `--help` output that lacks the "Currently supported:" segment
+	// (e.g. a future codebuddy release that drops the inline list)
+	// must yield an empty slice — never panic, never fall back to
+	// claudeStaticModels which would re-introduce the original bug.
+	cases := []string{
+		"",
+		"completely unrelated output",
+		"--model <model>  Model for the current session. (no parens)",
+	}
+	for _, in := range cases {
+		got := parseCodeBuddyHelpModels(in)
+		if len(got) != 0 {
+			t.Errorf("expected empty slice for input %q, got %+v", in, got)
+		}
+	}
+}
+
+func TestParseCodeBuddyHelpModelsDeduplicates(t *testing.T) {
+	input := `  --model <model>  Model for the current session. Currently supported: (claude-sonnet-4.6, gpt-5.4, claude-sonnet-4.6,  ,gpt-5.4)`
+	models := parseCodeBuddyHelpModels(input)
+	if len(models) != 2 {
+		t.Fatalf("expected 2 unique models, got %d: %+v", len(models), models)
+	}
+	if models[0].ID != "claude-sonnet-4.6" || models[1].ID != "gpt-5.4" {
+		t.Errorf("unexpected order/IDs: %+v", models)
+	}
+}
